@@ -1,0 +1,79 @@
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;700&display=swap');
+
+:root {
+  --bg: #07141c;
+  --bg-soft: rgba(10, 26, 35, 0.84);
+  --panel: rgba(7, 20, 28, 0.74);
+  --panel-strong: rgba(7, 20, 28, 0.92);
+  --line: rgba(122, 208, 224, 0.2);
+  --line-strong: rgba(122, 208, 224, 0.48);
+  --text: #e9f6fb;
+  --muted: #9fc2cb;
+  --accent: #ef8d32;
+  --accent-soft: #ffd073;
+  --sea: #79dbe6;
+  --shadow: 0 28px 80px rgba(0, 0, 0, 0.38);
+  --heading-font: 'Chakra Petch', 'Trebuchet MS', sans-serif;
+  --body-font: 'Space Grotesk', 'Segoe UI', sans-serif;
+  --mono-font: 'Chakra Petch', monospace;
+
+  color: var(--text);
+  background:
+    radial-gradient(circle at top, rgba(65, 136, 155, 0.34), transparent 38%),
+    linear-gradient(180deg, #0c2633 0%, #07141c 58%, #050d13 100%);
+  font-family: var(--body-font);
+  font-synthesis: none;
+  font-weight: 400;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(239, 141, 50, 0.1), transparent 24%),
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.02) 0%,
+      rgba(255, 255, 255, 0) 28%,
+      rgba(255, 255, 255, 0.03) 50%,
+      rgba(255, 255, 255, 0) 76%
+    );
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}

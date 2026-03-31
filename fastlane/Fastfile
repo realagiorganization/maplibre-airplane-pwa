@@ -1,0 +1,7 @@
+default_platform(:ios)
+
+desc 'Install dependencies, lint, and build the published PWA bundle'
+lane :publish do
+  sh('npm ci')
+  sh('npm run verify')
+end
