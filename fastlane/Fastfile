@@ -1,4 +1,4 @@
-default_platform(:ios)
+opt_out_usage
 
 desc 'Install dependencies, lint, and build the published PWA bundle'
 lane :publish do
