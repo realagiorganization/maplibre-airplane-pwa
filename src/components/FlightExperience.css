@@ -96,6 +96,64 @@
   transform: translateY(1px);
 }
 
+.run-result-shell {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(7, 20, 28, 0.08), rgba(7, 20, 28, 0.2));
+}
+
+.run-result {
+  width: min(28rem, 100%);
+  padding: 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 1.5rem;
+  background: linear-gradient(180deg, rgba(7, 20, 28, 0.96), rgba(7, 20, 28, 0.82));
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+
+.run-result.is-finished {
+  border-color: rgba(121, 219, 230, 0.28);
+}
+
+.run-result.is-crashed {
+  border-color: rgba(239, 141, 50, 0.4);
+}
+
+.run-result-label {
+  margin: 0;
+  color: var(--accent-soft);
+  font-family: var(--mono-font);
+  font-size: 0.78rem;
+  letter-spacing: 0.1rem;
+  text-transform: uppercase;
+}
+
+.run-result h2 {
+  margin: 0.2rem 0 0.55rem;
+  color: var(--text);
+  font-family: var(--heading-font);
+  font-size: clamp(1.8rem, 4vw, 2.4rem);
+  letter-spacing: -0.05em;
+}
+
+.run-result-body {
+  margin: 0;
+  color: var(--muted);
+}
+
+.run-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.95rem;
+}
+
 .hud-panel {
   position: absolute;
   right: 1rem;
@@ -131,6 +189,24 @@
   border-color: rgba(239, 141, 50, 0.35);
   color: var(--accent-soft);
   background: rgba(239, 141, 50, 0.1);
+}
+
+.status-chip.is-success {
+  border-color: rgba(121, 219, 230, 0.32);
+  color: #dffcff;
+  background: rgba(121, 219, 230, 0.12);
+}
+
+.status-chip.is-danger {
+  border-color: rgba(239, 141, 50, 0.4);
+  color: #ffe4bd;
+  background: rgba(239, 141, 50, 0.12);
+}
+
+.status-chip.is-warning {
+  border-color: rgba(247, 208, 147, 0.32);
+  color: #fff2d6;
+  background: rgba(247, 208, 147, 0.12);
 }
 
 .telemetry-grid {
@@ -210,6 +286,10 @@
   border-radius: 0.95rem;
   background: rgba(7, 20, 28, 0.68);
   color: var(--text);
+}
+
+.control-button:disabled {
+  opacity: 0.58;
 }
 
 .control-button.accent {
@@ -338,5 +418,10 @@
     min-width: 0;
     padding: 0.85rem 0.8rem;
     font-size: 0.74rem;
+  }
+
+  .run-result {
+    padding: 1rem;
+    border-radius: 1.2rem;
   }
 }

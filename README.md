@@ -9,7 +9,7 @@ flight experience over an open-source 3D map stack.
 - Terrain relief from raster DEM tiles
 - A rudimentary Three.js airplane rendered as a custom MapLibre layer
 - Autopilot orbit mode plus manual/touch override
-- Checkpoint scoring, lap timing, and a lightweight flight-game loop
+- One-lap checkpoint scoring with medal timing, finish state, and terrain-strike failure
 - Fastlane-driven verification for the GitHub Pages publish workflow
 
 ## Controls
@@ -23,13 +23,13 @@ Keyboard:
 - `Q` / `E`: throttle down / up
 - `M`: toggle autopilot/manual
 - `C`: toggle chase/free camera
-- `R`: reset position
+- `R`: reset position or restart an ended run
 - `Space`: pause or resume
 
 Touch:
 
 - On mobile/coarse-pointer devices, the lower control deck mirrors pitch, bank, and throttle
-- Manual mode tracks checkpoint captures, score, lap count, and best lap time
+- Manual mode resolves into medal-scored finishes or terrain-strike failures
 
 ## Roadmap
 

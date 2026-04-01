@@ -17,7 +17,7 @@ export interface FlightInputs {
 const FEET_PER_METER = 3.28084
 const KNOTS_PER_METER_PER_SECOND = 1.94384
 const LATITUDE_METERS_PER_DEGREE = 110_574
-const MIN_ALTITUDE_ABOVE_GROUND_METERS = 170
+const TERRAIN_STRIKE_CLEARANCE_METERS = 24
 const MIN_THROTTLE_PERCENT = 38
 const MAX_THROTTLE_PERCENT = 100
 const MAX_BANK_RADIANS = 0.72
@@ -100,11 +100,11 @@ export function stepManualFlight(
     current.altitudeMeters +
     Math.sin(pitchRadians) * speedMetersPerSecond * clampedDelta
 
-  const minimumAltitude =
-    (terrainElevationMeters ?? current.altitudeMeters - 900) +
-    MIN_ALTITUDE_ABOVE_GROUND_METERS
-  if (altitudeMeters < minimumAltitude) {
-    altitudeMeters = minimumAltitude
+  if (
+    terrainElevationMeters !== null &&
+    altitudeMeters < terrainElevationMeters + TERRAIN_STRIKE_CLEARANCE_METERS / 2
+  ) {
+    altitudeMeters = terrainElevationMeters + TERRAIN_STRIKE_CLEARANCE_METERS / 2
   }
 
   const trailCoordinates = updateTrail(current.trailCoordinates, [lng, lat])
@@ -125,6 +125,27 @@ export function stepManualFlight(
     throttlePercent,
     trailCoordinates,
   }
+}
+
+export function getTerrainClearanceMeters(
+  frame: Pick<SimFrame, 'altitudeMeters'>,
+  terrainElevationMeters: number | null,
+): number | null {
+  return terrainElevationMeters === null
+    ? null
+    : frame.altitudeMeters - terrainElevationMeters
+}
+
+export function isTerrainStrike(
+  frame: Pick<SimFrame, 'altitudeMeters'>,
+  terrainElevationMeters: number | null,
+): boolean {
+  const clearanceMeters = getTerrainClearanceMeters(frame, terrainElevationMeters)
+
+  return (
+    clearanceMeters !== null &&
+    clearanceMeters <= TERRAIN_STRIKE_CLEARANCE_METERS
+  )
 }
 
 function updateTrail(trail: Position[], point: Position): Position[] {
