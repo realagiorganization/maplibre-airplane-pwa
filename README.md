@@ -8,10 +8,13 @@ flight experience over an open-source 3D map stack.
 - MapLibre GL JS with OpenFreeMap vector tiles and 3D buildings
 - Terrain relief from raster DEM tiles
 - A rudimentary Three.js airplane rendered as a custom MapLibre layer
-- Autopilot orbit mode plus manual keyboard override
+- Autopilot orbit mode plus manual/touch override
+- Checkpoint scoring, lap timing, and a lightweight flight-game loop
 - Fastlane-driven verification for the GitHub Pages publish workflow
 
 ## Controls
+
+Keyboard:
 
 - `W` / `ArrowUp`: pitch up
 - `S` / `ArrowDown`: pitch down
@@ -22,6 +25,11 @@ flight experience over an open-source 3D map stack.
 - `C`: toggle chase/free camera
 - `R`: reset position
 - `Space`: pause or resume
+
+Touch:
+
+- On mobile/coarse-pointer devices, the lower control deck mirrors pitch, bank, and throttle
+- Manual mode tracks checkpoint captures, score, lap count, and best lap time
 
 ## Local development
 
