@@ -31,6 +31,10 @@ Touch:
 - On mobile/coarse-pointer devices, the lower control deck mirrors pitch, bank, and throttle
 - Manual mode tracks checkpoint captures, score, lap count, and best lap time
 
+## Roadmap
+
+See [`ROADMAP.md`](./ROADMAP.md) for the merged cinematic arcade + sim-lite plan, release milestones, and file-level workstreams.
+
 ## Local development
 
 ```bash
