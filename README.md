@@ -1,28 +1,40 @@
 # MapLibre Airplane PWA
 
 An installable React + Vite progressive web app that stages a lightweight
-flight experience over an open MapLibre scene.
+flight experience over an open-source 3D map stack.
 
 ## What is here
 
-- A polished landing section with an aviation-oriented visual language
-- A `FlightExperience` scene that animates a small flight loop over a live map
-- PWA registration via `vite-plugin-pwa`
-- A build surface that is small enough to publish quickly through GitHub Pages
+- MapLibre GL JS with OpenFreeMap vector tiles and 3D buildings
+- Terrain relief from raster DEM tiles
+- A rudimentary Three.js airplane rendered as a custom MapLibre layer
+- Autopilot orbit mode plus manual keyboard override
+- Fastlane-driven verification for the GitHub Pages publish workflow
+
+## Controls
+
+- `W` / `ArrowUp`: pitch up
+- `S` / `ArrowDown`: pitch down
+- `A` / `ArrowLeft`: bank left
+- `D` / `ArrowRight`: bank right
+- `Q` / `E`: throttle down / up
+- `M`: toggle autopilot/manual
+- `C`: toggle chase/free camera
+- `R`: reset position
+- `Space`: pause or resume
 
 ## Local development
 
 ```bash
 npm install
+bundle install
 npm run dev
 ```
 
-## Production build
+## Verification
 
 ```bash
+npm run lint
 npm run build
+bundle exec fastlane publish
 ```
-
-The current implementation is intentionally modest: it proves the interaction
-surface, map bootstrapping, and deployment path before a heavier simulator
-stack is added.
