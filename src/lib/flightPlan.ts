@@ -1,4 +1,5 @@
 import type { Feature, LineString, Position } from 'geojson'
+import { getFlightRoute, type FlightRouteDefinition } from './routes'
 
 export interface RoutePoint {
   altitudeMeters: number
@@ -12,78 +13,30 @@ export interface RoutePoint {
   speedKts: number
 }
 
+export interface FlightCheckpoint {
+  coordinates: [number, number]
+  label: string
+}
+
 export interface FlightFrame extends RoutePoint {
   altitudeFeet: number
   loopPercent: number
   trailCoordinates: Position[]
 }
 
-export const LOOP_DURATION_MS = 92_000
+export interface FlightPlan {
+  center: Position
+  checkpoints: FlightCheckpoint[]
+  loopDurationMs: number
+  route: FlightRouteDefinition
+  routeFeature: Feature<LineString>
+  sampleFlight: (elapsedMs: number) => FlightFrame
+}
 
-const CENTER: Position = [11.3968, 47.2672]
-const SAMPLE_COUNT = 360
-const SEGMENT_DURATION_SECONDS = LOOP_DURATION_MS / SAMPLE_COUNT / 1_000
 const FEET_PER_METER = 3.28084
 const KNOTS_PER_METER_PER_SECOND = 1.94384
 
-const routePoints = buildRoute()
-
-export const flightRouteFeature: Feature<LineString> = {
-  type: 'Feature',
-  properties: {
-    kind: 'planned-route',
-  },
-  geometry: {
-    type: 'LineString',
-    coordinates: routePoints.map((point) => [point.lng, point.lat]),
-  },
-}
-
-export const flightCenter = CENTER
-
-export function sampleFlight(elapsedMs: number): FlightFrame {
-  const progress =
-    ((elapsedMs % LOOP_DURATION_MS) + LOOP_DURATION_MS) % LOOP_DURATION_MS /
-    LOOP_DURATION_MS
-  const exactIndex = progress * routePoints.length
-  const baseIndex = Math.floor(exactIndex) % routePoints.length
-  const nextIndex = (baseIndex + 1) % routePoints.length
-  const blend = exactIndex - Math.floor(exactIndex)
-
-  const current = routePoints[baseIndex]
-  const next = routePoints[nextIndex]
-
-  const altitudeMeters = lerp(current.altitudeMeters, next.altitudeMeters, blend)
-  const speedKts = lerp(current.speedKts, next.speedKts, blend)
-  const headingRadians = interpolateAngle(
-    current.headingRadians,
-    next.headingRadians,
-    blend,
-  )
-  const bankRadians = interpolateAngle(
-    current.bankRadians,
-    next.bankRadians,
-    blend,
-  )
-  const pitchRadians = lerp(current.pitchRadians, next.pitchRadians, blend)
-  const lng = lerp(current.lng, next.lng, blend)
-  const lat = lerp(current.lat, next.lat, blend)
-
-  return {
-    altitudeFeet: altitudeMeters * FEET_PER_METER,
-    altitudeMeters,
-    bankRadians,
-    headingDegrees: toDegrees(headingRadians),
-    headingRadians,
-    lat,
-    lng,
-    loopPercent: progress * 100,
-    pitchRadians,
-    progress,
-    speedKts,
-    trailCoordinates: buildTrailCoordinates(progress, baseIndex, blend, lng, lat),
-  }
-}
+const flightPlanCache = new Map<string, FlightPlan>()
 
 export function createTrailFeature(
   trailCoordinates: Position[],
@@ -100,33 +53,125 @@ export function createTrailFeature(
   }
 }
 
-function buildRoute(): RoutePoint[] {
-  const rawPoints = Array.from({ length: SAMPLE_COUNT }, (_, index) => {
-    const progress = index / SAMPLE_COUNT
-    const angle = progress * Math.PI * 2
-    const lng =
-      CENTER[0] +
-      Math.cos(angle) * 0.09 +
-      Math.sin(angle * 2.1 + 0.5) * 0.012 +
-      Math.cos(angle * 4.4) * 0.0045
-    const lat =
-      CENTER[1] +
-      Math.sin(angle) * 0.048 +
-      Math.cos(angle * 1.7 - 0.2) * 0.01 +
-      Math.sin(angle * 3.8) * 0.0032
-    const altitudeMeters =
-      2_180 +
-      Math.sin(angle * 2 - 0.35) * 360 +
-      Math.cos(angle * 5.1) * 120 +
-      (Math.sin(angle * 0.5) + 1) * 70
+export function getFlightPlan(routeId: string): FlightPlan {
+  const cached = flightPlanCache.get(routeId)
+  if (cached) {
+    return cached
+  }
+
+  const route = getFlightRoute(routeId)
+  const plan = createFlightPlan(route)
+  flightPlanCache.set(routeId, plan)
+
+  return plan
+}
+
+function createFlightPlan(route: FlightRouteDefinition): FlightPlan {
+  const routePoints = buildRoute(route)
+  const routeFeature: Feature<LineString> = {
+    type: 'Feature',
+    properties: {
+      kind: 'planned-route',
+    },
+    geometry: {
+      type: 'LineString',
+      coordinates: routePoints.map((point) => [point.lng, point.lat]),
+    },
+  }
+  const checkpoints = buildCheckpoints(
+    routeFeature.geometry.coordinates,
+    route.checkpointCount,
+  )
+
+  return {
+    center: route.center,
+    checkpoints,
+    loopDurationMs: route.loopDurationMs,
+    route,
+    routeFeature,
+    sampleFlight(elapsedMs: number) {
+      const progress =
+        ((elapsedMs % route.loopDurationMs) + route.loopDurationMs) %
+        route.loopDurationMs /
+        route.loopDurationMs
+      const exactIndex = progress * routePoints.length
+      const baseIndex = Math.floor(exactIndex) % routePoints.length
+      const nextIndex = (baseIndex + 1) % routePoints.length
+      const blend = exactIndex - Math.floor(exactIndex)
+
+      const current = routePoints[baseIndex]
+      const next = routePoints[nextIndex]
+
+      const altitudeMeters = lerp(current.altitudeMeters, next.altitudeMeters, blend)
+      const speedKts = lerp(current.speedKts, next.speedKts, blend)
+      const headingRadians = interpolateAngle(
+        current.headingRadians,
+        next.headingRadians,
+        blend,
+      )
+      const bankRadians = interpolateAngle(
+        current.bankRadians,
+        next.bankRadians,
+        blend,
+      )
+      const pitchRadians = lerp(current.pitchRadians, next.pitchRadians, blend)
+      const lng = lerp(current.lng, next.lng, blend)
+      const lat = lerp(current.lat, next.lat, blend)
+
+      return {
+        altitudeFeet: altitudeMeters * FEET_PER_METER,
+        altitudeMeters,
+        bankRadians,
+        headingDegrees: toDegrees(headingRadians),
+        headingRadians,
+        lat,
+        lng,
+        loopPercent: progress * 100,
+        pitchRadians,
+        progress,
+        speedKts,
+        trailCoordinates: buildTrailCoordinates(
+          progress,
+          routePoints,
+          routeFeature,
+          baseIndex,
+          blend,
+          lng,
+          lat,
+        ),
+      }
+    },
+  }
+}
+
+function buildCheckpoints(
+  routeCoordinates: Position[],
+  checkpointCount: number,
+): FlightCheckpoint[] {
+  return Array.from({ length: checkpointCount }, (_, index) => {
+    const routeIndex = Math.floor((index * routeCoordinates.length) / checkpointCount)
+    const [lng, lat] = routeCoordinates[routeIndex]
 
     return {
-      altitudeMeters,
-      lat,
-      lng,
+      coordinates: [lng, lat],
+      label: `CP-${index + 1}`,
+    }
+  })
+}
+
+function buildRoute(route: FlightRouteDefinition): RoutePoint[] {
+  const rawPoints = Array.from({ length: route.sampleCount }, (_, index) => {
+    const progress = index / route.sampleCount
+    const sample = route.samplePoint(progress, route.center)
+
+    return {
+      altitudeMeters: sample.altitudeMeters,
+      lat: sample.lat,
+      lng: sample.lng,
       progress,
     }
   })
+  const segmentDurationSeconds = route.loopDurationMs / route.sampleCount / 1_000
 
   return rawPoints.map((point, index) => {
     const next = rawPoints[(index + 1) % rawPoints.length]
@@ -162,13 +207,15 @@ function buildRoute(): RoutePoint[] {
       pitchRadians: clamp(climbGradient * 2.8, -0.2, 0.2),
       progress: point.progress,
       speedKts:
-        (groundDistance / SEGMENT_DURATION_SECONDS) * KNOTS_PER_METER_PER_SECOND,
+        (groundDistance / segmentDurationSeconds) * KNOTS_PER_METER_PER_SECOND,
     }
   })
 }
 
 function buildTrailCoordinates(
   progress: number,
+  routePoints: RoutePoint[],
+  routeFeature: Feature<LineString>,
   baseIndex: number,
   blend: number,
   lng: number,
@@ -180,7 +227,7 @@ function buildTrailCoordinates(
     .map((point) => [point.lng, point.lat] satisfies Position)
 
   if (progress > 0.998) {
-    return flightRouteFeature.geometry.coordinates
+    return routeFeature.geometry.coordinates
   }
 
   if (baseIndex === 0 && blend === 0) {

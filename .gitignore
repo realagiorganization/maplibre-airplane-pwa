@@ -16,6 +16,8 @@ vendor/bundle
 !.bundle/config
 fastlane/README.md
 fastlane/report.xml
+devimages/
+selfIdentity.plist
 
 # Editor directories and files
 .vscode/*

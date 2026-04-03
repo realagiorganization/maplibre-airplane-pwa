@@ -1,20 +1,35 @@
-import type { FeatureCollection, Point, Position } from 'geojson'
+import type { Feature, FeatureCollection, LineString, Point, Position } from 'geojson'
 import type { GeoJSONSource, Map } from 'maplibre-gl'
 import maplibregl, { NavigationControl } from 'maplibre-gl'
 import {
   startTransition,
-  type PointerEvent as ReactPointerEvent,
   useEffect,
   useEffectEvent,
   useRef,
   useState,
 } from 'react'
+import { HudPanel, type MissionCardData, type StatusChipData, type TelemetryCardData } from './HudPanel'
+import { RunResultOverlay } from './RunResultOverlay'
+import { TouchControls } from './TouchControls'
 import { AirplaneLayer } from '../lib/airplaneLayer'
 import {
+  applyCameraRig,
+  captureCameraRig,
+  createCameraRig,
+  getCameraActionLabel,
+  getCameraModeLabel,
+  isFollowCameraMode,
+  nextCameraMode,
+  stepCameraRig,
+  type CameraMode,
+  type CameraRigState,
+} from '../lib/cameraRig'
+import {
   createTrailFeature,
-  flightCenter,
-  flightRouteFeature,
+  getFlightPlan,
+  type FlightCheckpoint,
 } from '../lib/flightPlan'
+import type { FlightMission, MedalTargets, MedalTier } from '../lib/missions'
 import {
   createManualFlightFrame,
   isTerrainStrike,
@@ -31,7 +46,6 @@ const TERRAIN_SOURCE_URL = 'https://demotiles.maplibre.org/terrain-tiles/tiles.j
 const ROUTE_SOURCE_ID = 'flight-route'
 const TRAIL_SOURCE_ID = 'flight-trail'
 const CHECKPOINT_SOURCE_ID = 'flight-checkpoints'
-const CHECKPOINT_COUNT = 6
 const CHECKPOINT_CAPTURE_METERS = 520
 const CHECKPOINT_SCORE = 100
 const FINISH_SCORE_BONUS = 450
@@ -52,23 +66,11 @@ const CONTROL_KEYS = new Set([
   'c',
   ' ',
 ])
-const MEDAL_TARGETS_MS: Record<MedalTier, number> = {
-  bronze: 132_000,
-  gold: 102_000,
-  silver: 116_000,
-}
 const MEDAL_SCORE_BONUS: Record<MedalTier, number> = {
   bronze: 250,
   gold: 900,
   silver: 550,
 }
-
-interface FlightCheckpoint {
-  coordinates: [number, number]
-  label: string
-}
-
-type MedalTier = 'bronze' | 'gold' | 'silver'
 
 type RunStatus = 'crashed' | 'finished' | 'preview' | 'running'
 
@@ -93,7 +95,8 @@ interface TelemetryState {
 type TouchInput = (typeof TOUCH_INPUTS)[number]
 
 type Controller = {
-  followCamera: boolean
+  cameraMode: CameraMode
+  cameraRig: CameraRigState
   frame: SimFrame
   game: GameState
   lastTickMs: number
@@ -107,21 +110,28 @@ type Controller = {
   timeOffsetMs: number
 }
 
-const flightCheckpoints = buildCheckpoints()
-const initialFrame = sampleAutopilotFrame(0)
-const initialGame = createPreviewGameState(initialFrame)
+interface FlightExperienceProps {
+  mission: FlightMission
+}
 
-export function FlightExperience() {
+export function FlightExperience({ mission }: FlightExperienceProps) {
+  const flightPlan = getFlightPlan(mission.routeId)
+  const flightCheckpoints = flightPlan.checkpoints
   const containerRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<Controller | null>(null)
   const activeInputsRef = useRef<Set<string>>(new Set())
-  const [telemetry, setTelemetry] = useState<TelemetryState>({
-    clearanceFeet: null,
-    frame: initialFrame,
-    game: initialGame,
-    runElapsedMs: null,
+  const [telemetry, setTelemetry] = useState<TelemetryState>(() => {
+    const initialFrame = sampleAutopilotFrame(flightPlan, 0)
+    const initialGame = createPreviewGameState(flightCheckpoints, initialFrame)
+
+    return {
+      clearanceFeet: null,
+      frame: initialFrame,
+      game: initialGame,
+      runElapsedMs: null,
+    }
   })
-  const [cameraMode, setCameraMode] = useState<'chase' | 'free'>('chase')
+  const [cameraMode, setCameraMode] = useState<CameraMode>('chase')
   const [isPaused, setIsPaused] = useState(false)
   const [pilotMode, setPilotMode] = useState<PilotMode>('autopilot')
   const [activeTouchInputs, setActiveTouchInputs] = useState<TouchInput[]>([])
@@ -152,8 +162,10 @@ export function FlightExperience() {
       return
     }
 
+    const initialFrame = sampleAutopilotFrame(flightPlan, 0)
+    const initialGame = createPreviewGameState(flightCheckpoints, initialFrame)
     const map = new maplibregl.Map({
-      center: flightCenter as [number, number],
+      center: flightPlan.center as [number, number],
       container: containerRef.current,
       maxPitch: 85,
       pitch: 76,
@@ -165,7 +177,8 @@ export function FlightExperience() {
     map.addControl(new NavigationControl({ visualizePitch: true }), 'top-right')
 
     const controller: Controller = {
-      followCamera: true,
+      cameraMode: 'chase',
+      cameraRig: createCameraRig(initialFrame, 'chase'),
       frame: initialFrame,
       game: initialGame,
       lastTickMs: performance.now(),
@@ -182,9 +195,15 @@ export function FlightExperience() {
     controllerRef.current = controller
 
     map.on('load', () => {
-      configureMap(map)
-      syncMapInteractions(map, true)
-      updateCheckpointSource(map, controller.game)
+      configureMap(
+        map,
+        flightPlan.routeFeature,
+        initialFrame.trailCoordinates,
+        flightCheckpoints,
+        initialGame.activeCheckpointIndex,
+      )
+      syncMapInteractions(map, controller.cameraMode)
+      updateCheckpointSource(map, flightCheckpoints, controller.game)
 
       controller.tick = (timestamp: number) => {
         if (controller.paused) {
@@ -214,22 +233,30 @@ export function FlightExperience() {
           const nextTerrainMeters =
             map.queryTerrainElevation([nextFrame.lng, nextFrame.lat]) ?? terrainMeters
           nextGame = updateGameState(
+            flightCheckpoints,
+            mission.medalTargets,
             controller.game,
             nextFrame,
             nextTerrainMeters,
             timestamp,
           )
         } else {
-          nextFrame = sampleAutopilotFrame(elapsedMs)
-          nextGame = createPreviewGameState(nextFrame)
+          nextFrame = sampleAutopilotFrame(flightPlan, elapsedMs)
+          nextGame = createPreviewGameState(flightCheckpoints, nextFrame)
         }
 
         controller.frame = nextFrame
         controller.game = nextGame
         updateTrail(map, nextFrame.trailCoordinates)
-        updateCheckpointSource(map, nextGame)
-        if (controller.followCamera) {
-          updateChaseCamera(map, nextFrame)
+        updateCheckpointSource(map, flightCheckpoints, nextGame)
+        if (isFollowCameraMode(controller.cameraMode)) {
+          controller.cameraRig = stepCameraRig(
+            controller.cameraRig,
+            nextFrame,
+            controller.cameraMode,
+            deltaSeconds,
+          )
+          applyCameraRig(map, controller.cameraRig, controller.cameraMode)
         }
 
         startTransition(() => {
@@ -248,8 +275,9 @@ export function FlightExperience() {
 
       map.addLayer(new AirplaneLayer(() => controller.frame))
       updateTrail(map, initialFrame.trailCoordinates)
-      updateCheckpointSource(map, controller.game)
-      updateChaseCamera(map, initialFrame)
+      updateCheckpointSource(map, flightCheckpoints, controller.game)
+      controller.cameraRig = createCameraRig(initialFrame, 'chase')
+      applyCameraRig(map, controller.cameraRig, 'chase')
       setTelemetry(
         buildTelemetryState(map, initialFrame, controller.game, performance.now()),
       )
@@ -264,7 +292,7 @@ export function FlightExperience() {
       map.remove()
       controllerRef.current = null
     }
-  }, [])
+  }, [flightCheckpoints, flightPlan, mission.medalTargets])
   function togglePause() {
     const controller = controllerRef.current
     if (!controller || isTerminalGame(controller.game)) {
@@ -298,12 +326,22 @@ export function FlightExperience() {
       return
     }
 
-    controller.followCamera = !controller.followCamera
-    syncMapInteractions(controller.map, controller.followCamera)
-    setCameraMode(controller.followCamera ? 'chase' : 'free')
+    controller.cameraMode = nextCameraMode(controller.cameraMode)
+    syncMapInteractions(controller.map, controller.cameraMode)
+    setCameraMode(controller.cameraMode)
 
-    if (controller.followCamera) {
-      updateChaseCamera(controller.map, controller.frame)
+    if (isFollowCameraMode(controller.cameraMode)) {
+      controller.cameraRig = captureCameraRig(
+        controller.map,
+        controller.cameraRig.orbitPhase,
+      )
+      controller.cameraRig = stepCameraRig(
+        controller.cameraRig,
+        controller.frame,
+        controller.cameraMode,
+        1 / 60,
+      )
+      applyCameraRig(controller.map, controller.cameraRig, controller.cameraMode)
     }
   }
 
@@ -316,11 +354,16 @@ export function FlightExperience() {
     const now = performance.now()
     controller.mode = 'manual'
     controller.frame = createManualFlightFrame(controller.frame)
-    controller.game = createManualGameState(controller.frame, now)
+    controller.game = createManualGameState(flightCheckpoints, controller.frame, now)
     updateTrail(controller.map, controller.frame.trailCoordinates)
-    updateCheckpointSource(controller.map, controller.game)
-    if (controller.followCamera) {
-      updateChaseCamera(controller.map, controller.frame)
+    updateCheckpointSource(controller.map, flightCheckpoints, controller.game)
+    if (isFollowCameraMode(controller.cameraMode)) {
+      controller.cameraRig = createCameraRig(
+        controller.frame,
+        controller.cameraMode,
+        controller.cameraRig.orbitPhase,
+      )
+      applyCameraRig(controller.map, controller.cameraRig, controller.cameraMode)
     }
     setTelemetry(buildTelemetryState(controller.map, controller.frame, controller.game, now))
     resumeLoop(controller, now)
@@ -337,14 +380,20 @@ export function FlightExperience() {
       const now = performance.now()
       controller.mode = 'autopilot'
       controller.frame = sampleAutopilotFrame(
+        flightPlan,
         now - controller.simulationStartedAt - controller.timeOffsetMs,
       )
-      controller.game = createPreviewGameState(controller.frame)
+      controller.game = createPreviewGameState(flightCheckpoints, controller.frame)
       clearInputs()
       updateTrail(controller.map, controller.frame.trailCoordinates)
-      updateCheckpointSource(controller.map, controller.game)
-      if (controller.followCamera) {
-        updateChaseCamera(controller.map, controller.frame)
+      updateCheckpointSource(controller.map, flightCheckpoints, controller.game)
+      if (isFollowCameraMode(controller.cameraMode)) {
+        controller.cameraRig = createCameraRig(
+          controller.frame,
+          controller.cameraMode,
+          controller.cameraRig.orbitPhase,
+        )
+        applyCameraRig(controller.map, controller.cameraRig, controller.cameraMode)
       }
       setTelemetry(buildTelemetryState(controller.map, controller.frame, controller.game, now))
       resumeLoop(controller, now)
@@ -362,20 +411,25 @@ export function FlightExperience() {
     }
 
     const now = performance.now()
-    const resetFrame = sampleAutopilotFrame(0)
+    const resetFrame = sampleAutopilotFrame(flightPlan, 0)
     controller.frame =
       controller.mode === 'manual'
         ? createManualFlightFrame(resetFrame)
         : resetFrame
     controller.game =
       controller.mode === 'manual'
-        ? createManualGameState(controller.frame, now)
-        : createPreviewGameState(controller.frame)
+        ? createManualGameState(flightCheckpoints, controller.frame, now)
+        : createPreviewGameState(flightCheckpoints, controller.frame)
     clearInputs()
     updateTrail(controller.map, controller.frame.trailCoordinates)
-    updateCheckpointSource(controller.map, controller.game)
-    if (controller.followCamera) {
-      updateChaseCamera(controller.map, controller.frame)
+    updateCheckpointSource(controller.map, flightCheckpoints, controller.game)
+    if (isFollowCameraMode(controller.cameraMode)) {
+      controller.cameraRig = createCameraRig(
+        controller.frame,
+        controller.cameraMode,
+        controller.cameraRig.orbitPhase,
+      )
+      applyCameraRig(controller.map, controller.cameraRig, controller.cameraMode)
     }
     setTelemetry(buildTelemetryState(controller.map, controller.frame, controller.game, now))
     resumeLoop(controller, now)
@@ -468,213 +522,133 @@ export function FlightExperience() {
 
   const activeCheckpoint = flightCheckpoints[telemetry.game.activeCheckpointIndex]
   const runFinished = isTerminalGame(telemetry.game)
-  const statusChipClass =
-    telemetry.game.status === 'finished'
-      ? ' is-success'
-      : telemetry.game.status === 'crashed'
-        ? ' is-danger'
-        : ''
+  const showRunResult = pilotMode === 'manual' && runFinished
+  const statusChips = [
+    { label: 'MapLibre + OpenFreeMap', variant: 'accent' },
+    {
+      label:
+        pilotMode === 'manual'
+          ? formatRunStatusChip(telemetry.game.status)
+          : 'Autopilot orbit',
+      variant:
+        telemetry.game.status === 'finished'
+          ? 'success'
+          : telemetry.game.status === 'crashed'
+            ? 'danger'
+            : undefined,
+    },
+    {
+      label: getCameraModeLabel(cameraMode),
+    },
+    {
+      label: runFinished
+        ? 'Press R to restart'
+        : isPaused
+          ? 'Simulation paused'
+          : 'Simulation live',
+      variant: isPaused && !runFinished ? 'warning' : undefined,
+    },
+  ] satisfies StatusChipData[]
+  const telemetryCards = [
+    {
+      label: 'Speed',
+      value: `${Math.round(telemetry.frame.speedKts)} kt`,
+    },
+    {
+      label: 'Altitude',
+      value: `${Math.round(telemetry.frame.altitudeFeet).toLocaleString()} ft`,
+    },
+    {
+      label: 'Heading',
+      value: `${Math.round(telemetry.frame.headingDegrees)
+        .toString()
+        .padStart(3, '0')}°`,
+    },
+    {
+      label: pilotMode === 'manual' ? 'Throttle' : 'Loop',
+      value:
+        pilotMode === 'manual'
+          ? `${Math.round(telemetry.frame.throttlePercent)}%`
+          : `${Math.round(telemetry.frame.loopPercent)}%`,
+    },
+    {
+      label: 'Bank',
+      value: `${Math.round((telemetry.frame.bankRadians * 180) / Math.PI)}°`,
+    },
+    {
+      label: 'Clearance',
+      value:
+        telemetry.clearanceFeet === null
+          ? 'Terrain n/a'
+          : `${Math.round(telemetry.clearanceFeet).toLocaleString()} ft`,
+    },
+  ] satisfies TelemetryCardData[]
+  const missionCards = [
+    {
+      label: 'Score',
+      title: telemetry.game.score.toLocaleString(),
+      subtitle: getScoreSubtitle(telemetry.game, pilotMode, flightCheckpoints.length),
+    },
+    {
+      label: 'Medal',
+      title: getMedalTitle(telemetry.game),
+      subtitle: formatMedalTargets(mission.medalTargets),
+    },
+    {
+      label: 'Course',
+      title: getCourseTitle(telemetry.game, activeCheckpoint.label),
+      subtitle: getCourseSubtitle(
+        telemetry.game,
+        activeCheckpoint.label,
+        flightCheckpoints.length,
+      ),
+    },
+    {
+      label: 'Run Time',
+      title: getRunTimeTitle(telemetry.game, telemetry.runElapsedMs),
+      subtitle: getRunTimeSubtitle(telemetry.game, pilotMode),
+    },
+  ] satisfies MissionCardData[]
 
   return (
     <section className="experience-shell">
       <div className="map-stage">
         <div ref={containerRef} className="map-canvas" />
 
-        {pilotMode === 'manual' && runFinished ? (
-          <div className="run-result-shell">
-            <div
-              className={`run-result ${
-                telemetry.game.status === 'finished' ? 'is-finished' : 'is-crashed'
-              }`}
-            >
-              <p className="run-result-label">{getResultEyebrow(telemetry.game)}</p>
-              <h2>{getResultTitle(telemetry.game)}</h2>
-              <p className="run-result-body">{getResultBody(telemetry.game)}</p>
-              <div className="run-result-actions">
-                <button className="control-button accent" onClick={resetFlight}>
-                  Fly again
-                </button>
-                <button className="control-button" onClick={togglePilotMode}>
-                  Return to autopilot
-                </button>
-              </div>
-            </div>
-          </div>
+        {showRunResult ? (
+          <RunResultOverlay
+            body={getResultBody(telemetry.game, mission.medalTargets)}
+            eyebrow={getResultEyebrow(telemetry.game)}
+            isFinished={telemetry.game.status === 'finished'}
+            onFlyAgain={resetFlight}
+            onReturnToAutopilot={togglePilotMode}
+            title={getResultTitle(telemetry.game)}
+          />
         ) : null}
 
-        <div className="touch-deck" aria-label="Touch flight controls">
-          <div className="touch-pad">
-            <TouchButton
-              active={activeTouchInputs.includes('w')}
-              label="Pitch +"
-              onActiveChange={setTouchControl}
-              value="w"
-            />
-            <div className="touch-row">
-              <TouchButton
-                active={activeTouchInputs.includes('a')}
-                label="Bank L"
-                onActiveChange={setTouchControl}
-                value="a"
-              />
-              <TouchButton
-                active={activeTouchInputs.includes('s')}
-                label="Pitch -"
-                onActiveChange={setTouchControl}
-                value="s"
-              />
-              <TouchButton
-                active={activeTouchInputs.includes('d')}
-                label="Bank R"
-                onActiveChange={setTouchControl}
-                value="d"
-              />
-            </div>
-          </div>
+        <TouchControls
+          activeInputs={activeTouchInputs}
+          onActiveChange={setTouchControl}
+        />
 
-          <div className="touch-throttle">
-            <TouchButton
-              active={activeTouchInputs.includes('e')}
-              label="Throttle +"
-              onActiveChange={setTouchControl}
-              value="e"
-            />
-            <TouchButton
-              active={activeTouchInputs.includes('q')}
-              label="Throttle -"
-              onActiveChange={setTouchControl}
-              value="q"
-            />
-          </div>
-        </div>
-
-        <div className="hud-panel">
-          <div className="status-row">
-            <span className="status-chip accent">MapLibre + OpenFreeMap</span>
-            <span className={`status-chip${statusChipClass}`}>
-              {pilotMode === 'manual'
-                ? formatRunStatusChip(telemetry.game.status)
-                : 'Autopilot orbit'}
-            </span>
-            <span className="status-chip">
-              {cameraMode === 'chase' ? 'Chase camera' : 'Free camera'}
-            </span>
-            <span
-              className={`status-chip${
-                isPaused && !runFinished ? ' is-warning' : ''
-              }`}
-            >
-              {runFinished
-                ? 'Press R to restart'
-                : isPaused
-                  ? 'Simulation paused'
-                  : 'Simulation live'}
-            </span>
-          </div>
-
-          <div className="telemetry-grid">
-            <TelemetryCard
-              label="Speed"
-              value={`${Math.round(telemetry.frame.speedKts)} kt`}
-            />
-            <TelemetryCard
-              label="Altitude"
-              value={`${Math.round(telemetry.frame.altitudeFeet).toLocaleString()} ft`}
-            />
-            <TelemetryCard
-              label="Heading"
-              value={`${Math.round(telemetry.frame.headingDegrees)
-                .toString()
-                .padStart(3, '0')}°`}
-            />
-            <TelemetryCard
-              label={pilotMode === 'manual' ? 'Throttle' : 'Loop'}
-              value={
-                pilotMode === 'manual'
-                  ? `${Math.round(telemetry.frame.throttlePercent)}%`
-                  : `${Math.round(telemetry.frame.loopPercent)}%`
-              }
-            />
-            <TelemetryCard
-              label="Bank"
-              value={`${Math.round((telemetry.frame.bankRadians * 180) / Math.PI)}°`}
-            />
-            <TelemetryCard
-              label="Clearance"
-              value={
-                telemetry.clearanceFeet === null
-                  ? 'Terrain n/a'
-                  : `${Math.round(telemetry.clearanceFeet).toLocaleString()} ft`
-              }
-            />
-          </div>
-
-          <div className="control-row">
-            <button className="control-button accent" onClick={togglePilotMode}>
-              {pilotMode === 'manual' ? 'Return to autopilot' : 'Take manual control'}
-            </button>
-            <button className="control-button" onClick={toggleCameraMode}>
-              {cameraMode === 'chase' ? 'Switch to free camera' : 'Return to chase'}
-            </button>
-            <button
-              className="control-button"
-              disabled={runFinished}
-              onClick={togglePause}
-            >
-              {runFinished ? 'Run ended' : isPaused ? 'Resume flight' : 'Pause flight'}
-            </button>
-            <button className="control-button" onClick={resetFlight}>
-              {runFinished ? 'Fly again' : 'Reset position'}
-            </button>
-          </div>
-
-          <div className="mission-grid">
-            <MissionCard
-              label="Score"
-              title={telemetry.game.score.toLocaleString()}
-              subtitle={getScoreSubtitle(telemetry.game, pilotMode)}
-            />
-            <MissionCard
-              label="Medal"
-              title={getMedalTitle(telemetry.game)}
-              subtitle={formatMedalTargets()}
-            />
-            <MissionCard
-              label="Course"
-              title={getCourseTitle(telemetry.game, activeCheckpoint.label)}
-              subtitle={getCourseSubtitle(telemetry.game, activeCheckpoint.label)}
-            />
-            <MissionCard
-              label="Run Time"
-              title={getRunTimeTitle(telemetry.game, telemetry.runElapsedMs)}
-              subtitle={getRunTimeSubtitle(telemetry.game, pilotMode)}
-            />
-          </div>
-
-          <div className="controls-grid">
-            <article className="controls-card">
-              <p className="controls-label">Keyboard</p>
-              <ul>
-                <li>`W` / `ArrowUp`: pitch up</li>
-                <li>`S` / `ArrowDown`: pitch down</li>
-                <li>`A` / `ArrowLeft`: bank left</li>
-                <li>`D` / `ArrowRight`: bank right</li>
-                <li>`Q` / `E`: throttle down / up</li>
-              </ul>
-            </article>
-
-            <article className="controls-card">
-              <p className="controls-label">Touch + mode</p>
-              <ul>
-                <li>Bottom deck mirrors pitch, bank, and throttle</li>
-                <li>`M`: toggle autopilot/manual</li>
-                <li>`C`: toggle chase camera</li>
-                <li>`R`: reset position or restart a finished run</li>
-                <li>`Space`: pause or resume an active run</li>
-              </ul>
-            </article>
-          </div>
-        </div>
+        <HudPanel
+          cameraActionLabel={getCameraActionLabel(cameraMode)}
+          missionCards={missionCards}
+          onCameraAction={toggleCameraMode}
+          onPauseAction={togglePause}
+          onPrimaryAction={togglePilotMode}
+          onResetAction={resetFlight}
+          pauseActionLabel={
+            runFinished ? 'Run ended' : isPaused ? 'Resume flight' : 'Pause flight'
+          }
+          pauseDisabled={runFinished}
+          primaryActionLabel={
+            pilotMode === 'manual' ? 'Return to autopilot' : 'Take manual control'
+          }
+          resetActionLabel={runFinished ? 'Fly again' : 'Reset position'}
+          statusChips={statusChips}
+          telemetryCards={telemetryCards}
+        />
       </div>
 
       <div className="detail-row">
@@ -709,75 +683,13 @@ export function FlightExperience() {
   )
 }
 
-function TelemetryCard({
-  label,
-  value,
-}: {
-  label: string
-  value: string
-}) {
-  return (
-    <article className="telemetry-card">
-      <p>{label}</p>
-      <strong>{value}</strong>
-    </article>
-  )
-}
-
-function MissionCard({
-  label,
-  subtitle,
-  title,
-}: {
-  label: string
-  subtitle: string
-  title: string
-}) {
-  return (
-    <article className="mission-card">
-      <p>{label}</p>
-      <strong>{title}</strong>
-      <span>{subtitle}</span>
-    </article>
-  )
-}
-
-function TouchButton({
-  active,
-  label,
-  onActiveChange,
-  value,
-}: {
-  active: boolean
-  label: string
-  onActiveChange: (control: TouchInput, active: boolean) => void
-  value: TouchInput
-}) {
-  function activate(event: ReactPointerEvent<HTMLButtonElement>) {
-    event.preventDefault()
-    event.currentTarget.setPointerCapture(event.pointerId)
-    onActiveChange(value, true)
-  }
-
-  function deactivate() {
-    onActiveChange(value, false)
-  }
-
-  return (
-    <button
-      type="button"
-      className={`touch-button${active ? ' is-active' : ''}`}
-      onPointerCancel={deactivate}
-      onPointerDown={activate}
-      onPointerLeave={deactivate}
-      onPointerUp={deactivate}
-    >
-      {label}
-    </button>
-  )
-}
-
-function configureMap(map: Map) {
+function configureMap(
+  map: Map,
+  routeFeature: Feature<LineString>,
+  initialTrailCoordinates: Position[],
+  checkpoints: FlightCheckpoint[],
+  activeCheckpointIndex: number,
+) {
   if (!map.getSource('terrain-source')) {
     map.addSource('terrain-source', {
       type: 'raster-dem',
@@ -794,21 +706,21 @@ function configureMap(map: Map) {
   if (!map.getSource(ROUTE_SOURCE_ID)) {
     map.addSource(ROUTE_SOURCE_ID, {
       type: 'geojson',
-      data: flightRouteFeature,
+      data: routeFeature,
     })
   }
 
   if (!map.getSource(TRAIL_SOURCE_ID)) {
     map.addSource(TRAIL_SOURCE_ID, {
       type: 'geojson',
-      data: createTrailFeature(initialFrame.trailCoordinates),
+      data: createTrailFeature(initialTrailCoordinates),
     })
   }
 
   if (!map.getSource(CHECKPOINT_SOURCE_ID)) {
     map.addSource(CHECKPOINT_SOURCE_ID, {
       type: 'geojson',
-      data: buildCheckpointFeatureCollection(initialGame.activeCheckpointIndex),
+      data: buildCheckpointFeatureCollection(checkpoints, activeCheckpointIndex),
     })
   }
 
@@ -944,7 +856,11 @@ function updateTrail(map: Map, trailCoordinates: Position[]) {
   trailSource.setData(createTrailFeature(trailCoordinates))
 }
 
-function updateCheckpointSource(map: Map, game: GameState) {
+function updateCheckpointSource(
+  map: Map,
+  checkpoints: FlightCheckpoint[],
+  game: GameState,
+) {
   const checkpointSource = map.getSource(CHECKPOINT_SOURCE_ID) as
     | GeoJSONSource
     | undefined
@@ -952,25 +868,12 @@ function updateCheckpointSource(map: Map, game: GameState) {
     return
   }
 
-  checkpointSource.setData(buildCheckpointFeatureCollection(game.activeCheckpointIndex))
+  checkpointSource.setData(
+    buildCheckpointFeatureCollection(checkpoints, game.activeCheckpointIndex),
+  )
 }
 
-function updateChaseCamera(map: Map, frame: SimFrame) {
-  map.jumpTo({
-    bearing: frame.headingDegrees,
-    center: [frame.lng, frame.lat],
-    padding: {
-      bottom: 240,
-      left: 32,
-      right: 32,
-      top: 64,
-    },
-    pitch: 78,
-    zoom: frame.mode === 'manual' ? 14.35 : 14.1,
-  })
-}
-
-function syncMapInteractions(map: Map, followCamera: boolean) {
+function syncMapInteractions(map: Map, cameraMode: CameraMode) {
   const methods = [
     map.boxZoom,
     map.doubleClickZoom,
@@ -983,10 +886,10 @@ function syncMapInteractions(map: Map, followCamera: boolean) {
   ]
 
   for (const method of methods) {
-    if (followCamera) {
-      method.disable()
-    } else {
+    if (cameraMode === 'free') {
       method.enable()
+    } else {
+      method.disable()
     }
   }
 }
@@ -1030,22 +933,11 @@ function buildTelemetryState(
   }
 }
 
-function buildCheckpoints(): FlightCheckpoint[] {
-  const routeCoordinates = flightRouteFeature.geometry.coordinates
-
-  return Array.from({ length: CHECKPOINT_COUNT }, (_, index) => {
-    const routeIndex = Math.floor((index * routeCoordinates.length) / CHECKPOINT_COUNT)
-    const [lng, lat] = routeCoordinates[routeIndex]
-
-    return {
-      coordinates: [lng, lat],
-      label: `CP-${index + 1}`,
-    }
-  })
-}
-
-function createPreviewGameState(frame: SimFrame): GameState {
-  const nearest = findNearestCheckpoint([frame.lng, frame.lat])
+function createPreviewGameState(
+  checkpoints: FlightCheckpoint[],
+  frame: SimFrame,
+): GameState {
+  const nearest = findNearestCheckpoint(checkpoints, [frame.lng, frame.lat])
 
   return {
     activeCheckpointIndex: nearest.index,
@@ -1059,17 +951,22 @@ function createPreviewGameState(frame: SimFrame): GameState {
   }
 }
 
-function createManualGameState(frame: SimFrame, now: number): GameState {
-  const nearest = findNearestCheckpoint([frame.lng, frame.lat])
+function createManualGameState(
+  checkpoints: FlightCheckpoint[],
+  frame: SimFrame,
+  now: number,
+): GameState {
+  const nearest = findNearestCheckpoint(checkpoints, [frame.lng, frame.lat])
   const activeCheckpointIndex =
     nearest.distanceMeters < CHECKPOINT_CAPTURE_METERS
-      ? (nearest.index + 1) % flightCheckpoints.length
+      ? (nearest.index + 1) % checkpoints.length
       : nearest.index
 
   return {
     activeCheckpointIndex,
     checkpointCaptures: 0,
     distanceToCheckpointMeters: distanceToCheckpoint(
+      checkpoints,
       [frame.lng, frame.lat],
       activeCheckpointIndex,
     ),
@@ -1082,12 +979,15 @@ function createManualGameState(frame: SimFrame, now: number): GameState {
 }
 
 function updateGameState(
+  checkpoints: FlightCheckpoint[],
+  medalTargets: MedalTargets,
   game: GameState,
   frame: SimFrame,
   terrainMeters: number | null,
   now: number,
 ): GameState {
   const distanceToTarget = distanceToCheckpoint(
+    checkpoints,
     [frame.lng, frame.lat],
     game.activeCheckpointIndex,
   )
@@ -1115,13 +1015,12 @@ function updateGameState(
   }
 
   const checkpointCaptures = game.checkpointCaptures + 1
-  const completedCourse = checkpointCaptures >= flightCheckpoints.length
-  const nextCheckpointIndex =
-    (game.activeCheckpointIndex + 1) % flightCheckpoints.length
+  const completedCourse = checkpointCaptures >= checkpoints.length
+  const nextCheckpointIndex = (game.activeCheckpointIndex + 1) % checkpoints.length
 
   if (completedCourse) {
     const finishTimeMs = now - game.runStartedAtMs
-    const medalTier = resolveMedalTier(finishTimeMs)
+    const medalTier = resolveMedalTier(finishTimeMs, medalTargets)
 
     return {
       ...game,
@@ -1143,6 +1042,7 @@ function updateGameState(
     activeCheckpointIndex: nextCheckpointIndex,
     checkpointCaptures,
     distanceToCheckpointMeters: distanceToCheckpoint(
+      checkpoints,
       [frame.lng, frame.lat],
       nextCheckpointIndex,
     ),
@@ -1151,16 +1051,19 @@ function updateGameState(
   }
 }
 
-function resolveMedalTier(durationMs: number): MedalTier | null {
-  if (durationMs <= MEDAL_TARGETS_MS.gold) {
+function resolveMedalTier(
+  durationMs: number,
+  medalTargets: MedalTargets,
+): MedalTier | null {
+  if (durationMs <= medalTargets.gold) {
     return 'gold'
   }
 
-  if (durationMs <= MEDAL_TARGETS_MS.silver) {
+  if (durationMs <= medalTargets.silver) {
     return 'silver'
   }
 
-  if (durationMs <= MEDAL_TARGETS_MS.bronze) {
+  if (durationMs <= medalTargets.bronze) {
     return 'bronze'
   }
 
@@ -1168,11 +1071,12 @@ function resolveMedalTier(durationMs: number): MedalTier | null {
 }
 
 function buildCheckpointFeatureCollection(
+  checkpoints: FlightCheckpoint[],
   activeCheckpointIndex: number,
 ): FeatureCollection<Point, { active: number; label: string }> {
   return {
     type: 'FeatureCollection',
-    features: flightCheckpoints.map((checkpoint, index) => ({
+    features: checkpoints.map((checkpoint, index) => ({
       type: 'Feature',
       properties: {
         active: index === activeCheckpointIndex ? 1 : 0,
@@ -1186,12 +1090,15 @@ function buildCheckpointFeatureCollection(
   }
 }
 
-function findNearestCheckpoint(point: [number, number]) {
+function findNearestCheckpoint(
+  checkpoints: FlightCheckpoint[],
+  point: [number, number],
+) {
   let bestIndex = 0
   let bestDistance = Number.POSITIVE_INFINITY
 
-  for (let index = 0; index < flightCheckpoints.length; index += 1) {
-    const distance = distanceToCheckpoint(point, index)
+  for (let index = 0; index < checkpoints.length; index += 1) {
+    const distance = distanceToCheckpoint(checkpoints, point, index)
     if (distance < bestDistance) {
       bestDistance = distance
       bestIndex = index
@@ -1204,8 +1111,12 @@ function findNearestCheckpoint(point: [number, number]) {
   }
 }
 
-function distanceToCheckpoint(point: [number, number], checkpointIndex: number) {
-  const checkpoint = flightCheckpoints[checkpointIndex]
+function distanceToCheckpoint(
+  checkpoints: FlightCheckpoint[],
+  point: [number, number],
+  checkpointIndex: number,
+) {
+  const checkpoint = checkpoints[checkpointIndex]
   return distanceMeters(
     point[0],
     point[1],
@@ -1246,7 +1157,11 @@ function formatRunStatusChip(status: RunStatus): string {
   }
 }
 
-function getScoreSubtitle(game: GameState, pilotMode: PilotMode): string {
+function getScoreSubtitle(
+  game: GameState,
+  pilotMode: PilotMode,
+  checkpointCount: number,
+): string {
   if (pilotMode === 'autopilot') {
     return 'Arm manual mode to start scoring'
   }
@@ -1259,7 +1174,7 @@ function getScoreSubtitle(game: GameState, pilotMode: PilotMode): string {
     return 'Restart to improve the run'
   }
 
-  return `${game.checkpointCaptures}/${flightCheckpoints.length} checkpoints captured`
+  return `${game.checkpointCaptures}/${checkpointCount} checkpoints captured`
 }
 
 function getMedalTitle(game: GameState): string {
@@ -1276,11 +1191,11 @@ function getMedalTitle(game: GameState): string {
   return 'Targets live'
 }
 
-function formatMedalTargets(): string {
+function formatMedalTargets(medalTargets: MedalTargets): string {
   return [
-    `Gold ${formatDuration(MEDAL_TARGETS_MS.gold)}`,
-    `Silver ${formatDuration(MEDAL_TARGETS_MS.silver)}`,
-    `Bronze ${formatDuration(MEDAL_TARGETS_MS.bronze)}`,
+    `Gold ${formatDuration(medalTargets.gold)}`,
+    `Silver ${formatDuration(medalTargets.silver)}`,
+    `Bronze ${formatDuration(medalTargets.bronze)}`,
   ].join(' · ')
 }
 
@@ -1299,14 +1214,15 @@ function getCourseTitle(game: GameState, activeCheckpointLabel: string): string 
 function getCourseSubtitle(
   game: GameState,
   activeCheckpointLabel: string,
+  checkpointCount: number,
 ): string {
   switch (game.status) {
     case 'finished':
-      return `${game.checkpointCaptures}/${flightCheckpoints.length} checkpoints cleared`
+      return `${game.checkpointCaptures}/${checkpointCount} checkpoints cleared`
     case 'crashed':
       return `Missed ${activeCheckpointLabel}. Press R to restart`
     case 'running':
-      return `${game.checkpointCaptures}/${flightCheckpoints.length} cleared · ${formatDistance(game.distanceToCheckpointMeters)}`
+      return `${game.checkpointCaptures}/${checkpointCount} cleared · ${formatDistance(game.distanceToCheckpointMeters)}`
     case 'preview':
       return `${activeCheckpointLabel} · ${formatDistance(game.distanceToCheckpointMeters)}`
   }
@@ -1353,11 +1269,11 @@ function getResultTitle(game: GameState): string {
   return 'Terrain strike'
 }
 
-function getResultBody(game: GameState): string {
+function getResultBody(game: GameState, medalTargets: MedalTargets): string {
   if (game.status === 'finished') {
     const finishTime = formatDuration(game.finishTimeMs ?? 0)
     if (game.medalTier === null) {
-      return `You completed the route in ${finishTime}. Beat ${formatDuration(MEDAL_TARGETS_MS.bronze)} next run for bronze.`
+      return `You completed the route in ${finishTime}. Beat ${formatDuration(medalTargets.bronze)} next run for bronze.`
     }
 
     return `Finished in ${finishTime} for ${game.score.toLocaleString()} points. Press R or tap Fly again to chase a faster medal.`

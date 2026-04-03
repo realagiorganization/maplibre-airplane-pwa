@@ -1,5 +1,5 @@
 import type { Position } from 'geojson'
-import { sampleFlight, type FlightFrame } from './flightPlan'
+import type { FlightFrame, FlightPlan } from './flightPlan'
 
 export type PilotMode = 'autopilot' | 'manual'
 
@@ -25,8 +25,11 @@ const MAX_PITCH_RADIANS = 0.22
 const TARGET_TRAIL_SPACING_METERS = 110
 const MAX_TRAIL_POINTS = 420
 
-export function sampleAutopilotFrame(elapsedMs: number): SimFrame {
-  const frame = sampleFlight(elapsedMs)
+export function sampleAutopilotFrame(
+  flightPlan: FlightPlan,
+  elapsedMs: number,
+): SimFrame {
+  const frame = flightPlan.sampleFlight(elapsedMs)
 
   return {
     ...frame,

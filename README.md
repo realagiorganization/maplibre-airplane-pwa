@@ -8,6 +8,7 @@ flight experience over an open-source 3D map stack.
 - MapLibre GL JS with OpenFreeMap vector tiles and 3D buildings
 - Terrain relief from raster DEM tiles
 - A rudimentary Three.js airplane rendered as a custom MapLibre layer
+- Three scenic route plans with a front-door mission selector
 - Autopilot orbit mode plus manual/touch override
 - One-lap checkpoint scoring with medal timing, finish state, and terrain-strike failure
 - Fastlane-driven verification for the GitHub Pages publish workflow
@@ -22,7 +23,7 @@ Keyboard:
 - `D` / `ArrowRight`: bank right
 - `Q` / `E`: throttle down / up
 - `M`: toggle autopilot/manual
-- `C`: toggle chase/free camera
+- `C`: cycle chase/cinematic/free camera
 - `R`: reset position or restart an ended run
 - `Space`: pause or resume
 
@@ -50,3 +51,7 @@ npm run lint
 npm run build
 bundle exec fastlane publish
 ```
+
+## iPad VPN debugging
+
+See [`IPAD_VPN_DEBUGGING.md`](./IPAD_VPN_DEBUGGING.md) for the exact `~/vpn_interconnect` handoff, required Codex skills, and the sample-lab versus app-specific VPN lanes. As of April 3, 2026, the LAN control path was previously proven, but the VPN control path still fails until the iPad produces a real `10.100.0.0/24` fetch.
